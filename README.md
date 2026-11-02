@@ -1,126 +1,141 @@
-# Lane Line Extractor (Classical Computer Vision)
+# Classical Vehicle Motion Tracker
 
-A lane line extractor built with **OpenCV** and **NumPy**. It processes static road images and isolates highway lane lines using only classical computer vision techniques (no deep learning). This is the groundwork for a perception system.
+Detects vehicles in a video and tracks their frame-by-frame displacement using **classical computer vision**: Lucas-Kanade sparse optical flow, ORB feature matching and RANSAC. Works with **static cameras (CCTV)** and **moving cameras (dashcams)**.
 
-## Results
+![Vehicle tracker demo](demo.gif)
 
-### Test 1: mountain highway (`test1.jpeg`)
+*Boxes = tracked vehicles, label = persistent ID and camera-compensated speed (px/frame), yellow dots = tracked feature points, coloured line = recent trajectory.*
 
-| Input | Extracted lane lines |
-|-------|----------------------|
-| ![Test 1 input](test_images/test1.jpeg) | ![Test 1 result](output/test1_8_final_lanes.png) |
+### Demo video
 
-### Test 2: highway with guardrail (`test2.jpeg`)
+**[▶ Watch the full tracked video](demo_video.mp4)** (opens in GitHub's built-in player)
 
-| Input | Extracted lane lines |
-|-------|----------------------|
-| ![Test 2 input](test_images/test2.jpeg) | ![Test 2 result](output/test2_8_final_lanes.png) |
 
-In both images the red lines follow the dashed center line on the left and the solid white edge line on the right, so the lane the car is driving in is outlined. The trees, mountains, sky, and guardrail are ignored because of the color filter and the ROI mask.
-
-### Full pipeline (all 8 stages)
-
-![Pipeline grid test 1](output/test1_pipeline_grid.png)
-![Pipeline grid test 2](output/test2_pipeline_grid.png)
-
-> The script saves every stage to the `output/` folder after each run. Put `test1.jpeg` and `test2.jpeg` in `test_images/` and commit the `output/` files so the images show on GitHub.
+---
 
 ## How it works
 
-Each image goes through this pipeline:
+```mermaid
+flowchart LR
+    A[Video frame] --> B[ORB keypoints<br/>Hamming + Lowe ratio test]
+    B --> C[RANSAC homography<br/>= camera motion]
+    A --> D[Vehicle detection<br/>every N frames]
+    D --> E[IoU association<br/>with existing tracks]
+    E --> F[Shi-Tomasi features<br/>per vehicle]
+    F --> G[Lucas-Kanade optical flow<br/>forward-backward check]
+    G --> H[Box update: shift + scale<br/>outlier rejection]
+    C --> H
+    H --> I[Annotated MP4 + GIF]
+```
 
-1. **Load and resize**: the image is loaded with OpenCV and resized to a standard width of 960 px so the settings behave the same on every image.
-2. **HSV color filtering**: the image is converted from BGR to HSV and only **white** and **yellow** pixels are kept (the colors of lane paint). HSV separates color from brightness, so it is much more robust to lighting changes than filtering in BGR. The white brightness threshold is chosen automatically from the road area (97th percentile of brightness), or you can set it by hand.
-3. **Gaussian blur**: reduces noise so that Canny does not detect false edges.
-4. **Canny edge detection**: finds the boundaries of the filtered lane paint (default thresholds 50 / 150).
-5. **Region of Interest (ROI) mask**: a trapezoid in front of the camera keeps only the road area and removes sky, trees, and buildings.
-6. **Lane line fitting (extra)**: a probabilistic Hough transform finds line pieces. They are split into left and right by slope, averaged (longer pieces count more), and drawn in red on the original image. The lines stop at the vanishing point to avoid an "X" shape.
+| Stage | Technique | Purpose |
+|---|---|---|
+| Ego-motion | ORB features, Hamming-distance matching, Lowe's ratio test, RANSAC homography | Estimate how the camera moved between frames so vehicle speed can be measured relative to the road |
+| Detection | YOLO (pretrained COCO: car, motorcycle, bus, truck) every few frames; MOG2 background subtraction as a fallback for static cameras | Find vehicles. Cars driving ahead of a dashcam move *with* the camera, so motion cues alone cannot find them |
+| Tracking | Shi-Tomasi corners + pyramidal Lucas-Kanade optical flow | Follow each vehicle between detections, frame by frame |
+| Robustness | Forward-backward flow check, median outlier rejection, scale update, IoU re-association, track confirmation / expiry | Reject bad vectors, handle approaching/receding cars, keep stable IDs |
 
-## Pipeline stages saved to `output/`
+**Note on the detector:** detection uses a pretrained deep-learning model, but all *tracking* (displacement estimation, camera-motion compensation, outlier rejection) is classical computer vision.
 
-| File suffix | Description |
-|-------------|-------------|
-| `_1_original` | Resized input image |
-| `_2_hsv_mask` | Binary white + yellow mask |
-| `_3_hsv_filtered` | Original image with only white/yellow pixels |
-| `_4_blurred` | After Gaussian blur |
-| `_5_canny_edges` | Canny edge map |
-| `_6_roi_region` | ROI trapezoid drawn on the image |
-| `_7_roi_edges` | Edges inside the ROI only |
-| `_8_final_lanes` | Detected lane lines drawn on the image |
-| `_pipeline_grid` | All 8 stages in one picture |
+### Key ideas
 
-## Installation
+- **Lucas-Kanade optical flow** assumes constant pixel intensity in a small neighbourhood and solves for the motion of sparse feature points. A reverse (backward) flow pass discards points that do not return to where they started.
+- **ORB** is a fast, rotation-aware binary descriptor, matched with Hamming distance. **Lowe's ratio test** removes ambiguous matches; **RANSAC** fits a homography to the background and ignores outliers (moving vehicles).
+- **Camera-compensated speed:** the displayed px/frame is the vehicle's motion *minus* the motion the camera model predicts at that location.
 
-Requires Python 3.8+.
+---
+
+## Setup
+
+Python 3.9+ is recommended.
 
 ```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
-pip install opencv-python numpy
+python3 -m venv ~/cvenv
+source ~/cvenv/bin/activate
+pip install ultralytics opencv-python numpy pillow
 ```
+
+The YOLO weights (`yolov8s.pt` by default) download automatically on first run.
+
+Optional, for the file-chooser window: `sudo apt install python3-tk`
 
 ## Usage
 
-```bash
-python lane_extractor.py
+### Easiest: press Run
+
+1. Open `video_processor.py` in VS Code (select the interpreter from your venv).
+2. Edit the **SETTINGS** block at the top if you like:
+
+```python
+VIDEO = ""            # "" = file chooser opens; or "~/Downloads/video1.mp4"
+CAMERA = "auto"       # "auto" | "moving" (dashcam) | "static" (CCTV)
+HOOD_PERCENT = 45     # % of frame bottom covered by your own car's hood (0 = none)
+QUALITY = "balanced"  # "fast" | "balanced" | "best"
+PREVIEW = "browser"   # "none" | "browser" | "window"
 ```
 
-The program is interactive:
+3. Click **Run Python File**. Pick a video, watch the live preview in your browser, and the GIF opens when finished.
 
-1. Enter the path of an image or a folder of images (`q` to quit).
-2. Choose whether to customize the settings (`y` / `N`).
-3. The stages are saved to `output/` and shown in a window (press any key to close it).
-4. After each image: `Enter` = next image, `r` = retune settings for this image, `q` = quit.
+### Command line
 
-Supported formats: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`. Landscape road photos taken from the driver's point of view work best.
+```bash
+python video_processor.py --video clip.mp4 --mode moving --hood 0.45 --quality best
+```
 
-## Settings
+| Option | Description |
+|---|---|
+| `--video` | Input video path (`0` = webcam) |
+| `--mode auto\|moving\|static` | Camera type; `auto` measures background motion in the first frames |
+| `--hood 0.45` | Fraction of the frame bottom to ignore (your own car's hood) |
+| `--quality fast\|balanced\|best` | Accuracy/speed preset (model size, input size, detection frequency, confidence) |
+| `--preview none\|browser\|window` | Live preview. `browser` serves MJPEG on `127.0.0.1:8080` and cannot crash; `window` uses an OpenCV window |
+| `--check` | Detector self-test: run YOLO on one frame, save `<name>_check.jpg`, exit |
+| `--debug` | Also draw raw detector boxes (white) |
+| `--conf`, `--imgsz`, `--weights` | Override the preset's detector settings |
+| `--detector yolo\|motion\|auto` | Choose detector (`motion` = background subtraction / flow-residual fallback) |
+| `--out`, `--gif` | Output paths (default: next to the input video) |
 
-| Setting | Default | Meaning |
-|---------|---------|---------|
-| `horizon` | 0.60 | Height of the ROI top edge (0 = top of image, 1 = bottom). Range 0.4 to 0.85 |
-| `white_v` | auto | White brightness threshold (0 to 255) |
-| `blur` | 5 | Gaussian blur kernel size (must be odd) |
-| `canny_low` | 50 | Canny lower threshold |
-| `canny_high` | 150 | Canny upper threshold |
+### Outputs
 
-### Tuning tips
+- `<video>_tracked.mp4`: full annotated video
+- `<video>_demo.gif`: short GIF for the README (`--gif-width`, `--gif-max-frames`, `--gif-step` control size)
 
-- Lane lines missing: lower `white_v` or `canny_low`, or move `horizon` up.
-- Too much noise or false lines: raise `canny_low`/`canny_high`, increase `blur`, or move `horizon` down.
-- Strong shadows or very bright roads: set `white_v` manually.
+### Quality presets
+
+| Preset | Model | Input size | Detects | Use when |
+|---|---|---|---|---|
+| `fast` | yolov8n | 960 | every 3 frames | quick tests |
+| `balanced` | yolov8s | 1280 | every 2 frames | normal use |
+| `best` | yolov8m | 1280 | every frame | final results, distant cars (slower on CPU) |
+
+---
+
+## Tuning and troubleshooting
+
+- **Nothing detected:** run `--check` first. Green boxes are detections; the red line is the hood cut-off. Try `--quality best` or `--conf 0.08`.
+- **Boxes on your own hood:** increase `--hood` until the red line sits on the hood edge.
+- **Cars missed far away:** detection runs on the original-resolution frame; use `--quality best`.
+- **Preview window crashes (Linux/GNOME):** use `--preview browser`.
+- **`No module named 'ultralytics'`:** run inside the venv where it is installed.
+
+## Limitations
+
+- No detector is perfect: very small or distant vehicles, heavy occlusion, night footage and glare cause misses or false boxes.
+- The detector only knows COCO vehicle classes (car, motorcycle, bus, truck).
+- Tracking is box-based sparse optical flow; vehicles with very few trackable corners can drift between detections.
+- Speeds are in pixels per frame, not real-world units (no camera calibration).
+- The motion-only fallback detector cannot see cars that move with a dashcam, so YOLO is the default for moving cameras.
 
 ## Project structure
 
 ```
 .
-├── lane_extractor.py     # main script
-├── README.md
-├── test_images/          # your road images
-└── output/               # generated results and screenshots
+├── video_processor.py   # the whole tracker (detection, ego-motion, tracking, preview, GIF export)
+├── demo.gif             # demo shown above
+├── demo_video.mp4       # full annotated demo video
+└── README.md
 ```
 
-## Limitations
+## Tech stack
 
-- Works on static images only (no temporal smoothing like in video).
-- Assumes a roughly straight road and a forward-facing camera; sharp curves are approximated by straight lines.
-- The fixed ROI trapezoid assumes the camera is centered and the horizon is near the middle of the image.
-- Performance drops in heavy shadows, night scenes, rain, or faded paint.
-
-## Possible improvements
-
-- Perspective (bird's-eye) transform with polynomial curve fitting for curved lanes.
-- Adaptive ROI based on the detected vanishing point.
-- Temporal smoothing for video input.
-- Evaluation against a labeled dataset (for example TuSimple).
-
-## Resources
-
-- [FreeCodeCamp: OpenCV Course - Full Tutorial for Beginners](https://www.freecodecamp.org/)
-- [Towards Data Science: Canny Edge Detection Step-by-Step in Python](https://towardsdatascience.com/)
-- [OpenCV Docs: Image Processing Tutorials](https://docs.opencv.org/)
-
-## Author
-
-Your Name — Classical Computer Vision assignment, submitted 26/10/2026.
+Python · OpenCV (ORB, Lucas-Kanade, MOG2, RANSAC homography) · NumPy · Pillow · Ultralytics YOLO
